@@ -28,7 +28,7 @@ VERSION = "1.0.0"
 # Ejemplo con GitHub:
 #   https://raw.githubusercontent.com/TU_USUARIO/TU_REPO/main/version.json
 # Si está vacío, la app no busca actualizaciones.
-URL_VERSION = ""
+URL_VERSION = "https://github.com/facuuuburgos/Spotiseek/releases/latest/download/version.json"
 
 # Archivos que una actualización puede reemplazar (nada más).
 ARCHIVOS_PERMITIDOS = {
