@@ -54,6 +54,11 @@ REINICIAR_SLSKD_AL_ABRIR = False
 # pueden hacer que la red de Soulseek te limite. 6 es un buen punto de partida.
 MAX_SIMULTANEAS = 6
 
+# Cuántas canciones pueden estar a la vez en proceso (buscando o descargando).
+# MAX_SIMULTANEAS limita solo las que están buscando: apenas una empieza a
+# descargar, deja su lugar a la siguiente búsqueda.
+MAX_EN_PROCESO = 14
+
 # La búsqueda comienza a procesarse inmediatamente.
 # Máximo de segundos de búsqueda ACTIVA (desde que slskd la ejecuta de verdad).
 # Pasado ese tiempo se DETIENE la búsqueda y se leen los resultados que llegaron.
@@ -115,6 +120,151 @@ class ControlDescarga:
 
 
 # ============================================================
+# AJUSTES DEL USUARIO (se guardan en ajustes.json junto a la app)
+# ============================================================
+
+AJUSTES_PREDETERMINADOS = {
+    # "" = la carpeta «downloads» de la app
+    "carpeta_descargas": "",
+    # "titulo_artista" -> «Canción - Artista»   |   "artista_titulo" -> «Artista - Canción»
+    "formato_nombre": "titulo_artista",
+    "seg_sin_arranque": 60,
+    "seg_sin_progreso": 30,
+    "espera_busqueda": 25,
+    "candidatos_en_carrera": 3,
+    "max_simultaneas": 6,
+    "preferir_extended": True,
+    "youtube_respaldo": False,
+    "youtube_bitrate": 320,
+    "confirmar_cierre": True,
+    "buscar_actualizaciones": True,
+    "abrir_carpeta_al_terminar": False,
+}
+
+# (mínimo, máximo) de los ajustes numéricos
+LIMITES_AJUSTES = {
+    "seg_sin_arranque": (10, 900),
+    "seg_sin_progreso": (10, 600),
+    "espera_busqueda": (8, 120),
+    "candidatos_en_carrera": (1, 6),
+    "max_simultaneas": (1, 12),
+}
+
+BITRATES_YOUTUBE = (128, 192, 256, 320)
+
+EXTENSIONES_AUDIO_FINALES = {".mp3", ".flac", ".wav", ".m4a", ".ogg", ".opus", ".aac", ".wma", ".aiff", ".aif", ".alac", ".ape"}
+
+
+def glob_literal(texto):
+    """Escapa los caracteres especiales de glob ([ ] * ?) para buscar un nombre tal cual."""
+    return "".join(f"[{c}]" if c in "[]*?" else c for c in str(texto))
+
+FORMATO_NOMBRE = "titulo_artista"
+
+
+class Ajustes:
+    """Lee y guarda las preferencias del usuario."""
+
+    def __init__(self, base_dir):
+        self.archivo = Path(base_dir) / "ajustes.json"
+        self.datos = dict(AJUSTES_PREDETERMINADOS)
+        self.cargar()
+
+    def cargar(self):
+
+        try:
+            if self.archivo.exists():
+                crudo = json.loads(self.archivo.read_text(encoding="utf-8"))
+
+                if isinstance(crudo, dict):
+                    for clave, valor in crudo.items():
+                        if clave in AJUSTES_PREDETERMINADOS:
+                            self.datos[clave] = valor
+
+        except Exception as e:
+            print(f"[AJUSTES] No se pudo leer ajustes.json: {e}")
+
+        self.datos = self._validar(self.datos)
+
+    @staticmethod
+    def _validar(datos):
+        """Deja cada ajuste con un valor válido (si no, el predeterminado)."""
+
+        limpio = dict(AJUSTES_PREDETERMINADOS)
+
+        for clave, defecto in AJUSTES_PREDETERMINADOS.items():
+
+            valor = datos.get(clave, defecto)
+
+            try:
+
+                if isinstance(defecto, bool):
+                    valor = bool(valor)
+
+                elif clave in LIMITES_AJUSTES:
+                    bajo, alto = LIMITES_AJUSTES[clave]
+                    valor = max(bajo, min(alto, int(valor)))
+
+                elif clave == "youtube_bitrate":
+                    valor = int(valor)
+                    if valor not in BITRATES_YOUTUBE:
+                        valor = defecto
+
+                elif clave == "formato_nombre":
+                    if valor not in ("titulo_artista", "artista_titulo"):
+                        valor = defecto
+
+                else:
+                    valor = str(valor or "").strip()
+
+            except Exception:
+                valor = defecto
+
+            limpio[clave] = valor
+
+        return limpio
+
+    def get(self, clave):
+        return self.datos.get(clave, AJUSTES_PREDETERMINADOS.get(clave))
+
+    def actualizar(self, nuevos):
+        """Valida, guarda y devuelve True si se pudo escribir el archivo."""
+
+        combinados = dict(self.datos)
+        combinados.update(nuevos or {})
+
+        self.datos = self._validar(combinados)
+
+        try:
+            self.archivo.write_text(
+                json.dumps(self.datos, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            return True
+
+        except Exception as e:
+            print(f"[AJUSTES] No se pudo guardar ajustes.json: {e}")
+            return False
+
+
+def construir_nombre(artista, titulo, formato=None):
+    """Nombre de archivo (sin extensión): «Canción - Artista» o «Artista - Canción»."""
+
+    artista = str(artista or "").replace("\xa0", " ").strip()
+    titulo = str(titulo or "").replace("\xa0", " ").strip()
+
+    formato = formato or FORMATO_NOMBRE
+
+    partes = [artista, titulo] if formato == "artista_titulo" else [titulo, artista]
+
+    nombre = " - ".join(p for p in partes if p)
+
+    nombre = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", nombre)
+    nombre = re.sub(r"\s+", " ", nombre).strip(" .")
+
+    return nombre[:180].strip(" .") or "cancion"
+
+
+# ============================================================
 # UTILIDADES
 # ============================================================
 
@@ -150,8 +300,15 @@ class SoulseekDownloader:
         self.base_dir = Path(base_dir)
         self.slskd_dir = self.base_dir / "slskd"
         self.slskd_exe = self.slskd_dir / "slskd.exe"
-        self.download_dir = self.base_dir / "downloads"
-        self.incomplete_dir = self.download_dir / ".incomplete"
+        # Carpeta interna donde slskd deja lo que baja (con sus subcarpetas).
+        self.staging_dir = self.base_dir / "downloads"
+        self.incomplete_dir = self.staging_dir / ".incomplete"
+
+        self.ajustes = Ajustes(self.base_dir)
+
+        # Carpeta final: ahí queda SOLO el archivo de audio.
+        self.download_dir = self.staging_dir
+        self.aplicar_ajustes()
         self.log_arranque = self.base_dir / "slskd_arranque.log"
 
         # Último código HTTP que devolvió slskd al preguntarle si estaba vivo
@@ -188,8 +345,56 @@ class SoulseekDownloader:
         self._dirs_slskd = None
         self._credenciales = {"username": None, "password": None}
 
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.incomplete_dir.mkdir(parents=True, exist_ok=True)
+
+        self.limpiar_staging()
+
+    # ========================================================
+    # AJUSTES
+    # ========================================================
+
+    def aplicar_ajustes(self):
+        """Pone en marcha los ajustes guardados (se puede llamar en cualquier momento)."""
+
+        global SEGUNDOS_SIN_ARRANQUE, SEGUNDOS_SIN_PROGRESO, ESPERA_BUSQUEDA_SEG
+        global CANDIDATOS_EN_CARRERA, PREFERIR_EXTENDED_MIX, MAX_SIMULTANEAS, FORMATO_NOMBRE
+
+        a = self.ajustes
+
+        SEGUNDOS_SIN_ARRANQUE = a.get("seg_sin_arranque")
+        SEGUNDOS_SIN_PROGRESO = a.get("seg_sin_progreso")
+        ESPERA_BUSQUEDA_SEG = a.get("espera_busqueda")
+        CANDIDATOS_EN_CARRERA = a.get("candidatos_en_carrera")
+        PREFERIR_EXTENDED_MIX = a.get("preferir_extended")
+        MAX_SIMULTANEAS = a.get("max_simultaneas")
+        FORMATO_NOMBRE = a.get("formato_nombre")
+
+        try:
+            import youtube
+
+            youtube.YT_BITRATE_MP3 = str(a.get("youtube_bitrate"))
+
+        except Exception:
+            pass
+
+        # Carpeta final
+        elegida = str(a.get("carpeta_descargas") or "").strip()
+
+        destino = Path(elegida).expanduser() if elegida else self.staging_dir
+
+        try:
+            destino.mkdir(parents=True, exist_ok=True)
+
+        except Exception as e:
+            print(f"[AJUSTES] No se pudo usar la carpeta «{destino}»: {e}. Se usa la predeterminada.")
+            destino = self.staging_dir
+
+        self.download_dir = destino
+
+        # YouTube guarda directo en la carpeta final: se vuelve a crear con la carpeta nueva.
+        self._yt = None
 
     # ========================================================
     # SLSKD - SERVIDOR
@@ -292,7 +497,15 @@ class SoulseekDownloader:
                     valor = m.group(3).strip()
 
                     # Quitar comentarios al final de la línea y comillas
-                    valor = re.split(r"\s+#", valor)[0].strip().strip("'\"")
+                    valor = re.split(r"\s+#", valor)[0].strip()
+
+                    if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
+                        try:
+                            valor = json.loads(valor)
+                        except Exception:
+                            valor = valor[1:-1]
+                    else:
+                        valor = valor.strip("'\"")
 
                     while pila and pila[-1][0] >= sangria:
                         pila.pop()
@@ -516,6 +729,11 @@ class SoulseekDownloader:
 
         self._primer_arranque_hecho = True
 
+        # Si el slskd.yml tenía carpetas mal escritas, se corrige y se reinicia slskd
+        # para que use la configuración buena.
+        if not _reintento and self.reparar_configuracion():
+            self._cerrar_slskd_existente()
+
         # Primero comprobar si ya está funcionando.
 
         listo, motivo = self._estado_api()
@@ -660,6 +878,90 @@ class SoulseekDownloader:
     # CONFIGURACIÓN DE SOULSEEK (slskd.yml generado por la app)
     # ========================================================
 
+    @staticmethod
+    def _ruta_para_slskd(ruta, windows=None):
+        """
+        Ruta absoluta con los separadores del sistema (en Windows, con \\).
+        slskd compara la ruta con su forma normalizada: si lleva «/» en Windows
+        falla con «Only absolute paths may be specified».
+        """
+
+        if windows is None:
+            windows = platform.system() == "Windows"
+
+        texto = str(ruta)
+
+        if windows:
+            texto = texto.replace("/", "\\")
+            while "\\\\" in texto[2:]:
+                texto = texto[:2] + texto[2:].replace("\\\\", "\\")
+            texto = texto.rstrip("\\") if len(texto) > 3 else texto
+            return texto
+
+        return os.path.normpath(texto)
+
+    def reparar_configuracion(self, windows=None):
+        """
+        Corrige un slskd.yml (de una versión anterior de la app) cuyas carpetas
+        de descarga usan «/» en Windows. Devuelve True si cambió algo.
+        """
+
+        if windows is None:
+            windows = platform.system() == "Windows"
+
+        if not windows:
+            return False
+
+        archivo = self.slskd_dir / "slskd.yml"
+
+        try:
+            if not archivo.exists():
+                return False
+
+            texto = archivo.read_text(encoding="utf-8", errors="replace")
+
+        except Exception:
+            return False
+
+        cambiado = False
+        lineas = []
+
+        for linea in texto.splitlines():
+
+            m = re.match(r"^(\s+)(downloads|incomplete):\s*(.*)$", linea)
+
+            if m:
+
+                valor = re.split(r"\s+#", m.group(3))[0].strip()
+                comillas = valor[:1] if valor[:1] in "\"'" else ""
+                limpio = valor.strip("\"'")
+
+                if "/" in limpio and re.match(r"^[A-Za-z]:", limpio):
+
+                    nuevo_valor = self._ruta_para_slskd(limpio, windows=True)
+
+                    # En YAML entre comillas dobles hay que duplicar las barras.
+                    if comillas == "'":
+                        escrito = "'" + nuevo_valor + "'"
+                    else:
+                        escrito = json.dumps(nuevo_valor)
+
+                    linea = f"{m.group(1)}{m.group(2)}: {escrito}"
+                    cambiado = True
+
+            lineas.append(linea)
+
+        if cambiado:
+            try:
+                shutil.copy2(archivo, self.slskd_dir / "slskd.yml.bak")
+                archivo.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+                print("[SLSKD] slskd.yml reparado: carpetas con separadores de Windows.")
+            except Exception as e:
+                print(f"[SLSKD] No se pudo reparar slskd.yml: {e}")
+                return False
+
+        return cambiado
+
     def usuario_soulseek_configurado(self):
         """Usuario de Soulseek que hay en slskd.yml ('' si no hay)."""
         return self._configuracion_slskd(solo_local=True).get("soulseek.username", "")
@@ -682,7 +984,7 @@ class SoulseekDownloader:
             raise ValueError("Falta el usuario o la contraseña de Soulseek.")
 
         self.slskd_dir.mkdir(parents=True, exist_ok=True)
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
         self.incomplete_dir.mkdir(parents=True, exist_ok=True)
 
         destino = self.slskd_dir / "slskd.yml"
@@ -710,8 +1012,8 @@ class SoulseekDownloader:
             f"    username: {q(usuario_web)}\n"
             f"    password: {q(clave_web)}\n"
             "directories:\n"
-            f"  downloads: {q(self.download_dir.as_posix())}\n"
-            f"  incomplete: {q(self.incomplete_dir.as_posix())}\n"
+            f"  downloads: {q(self._ruta_para_slskd(self.staging_dir))}\n"
+            f"  incomplete: {q(self._ruta_para_slskd(self.incomplete_dir))}\n"
             "soulseek:\n"
             f"  username: {q(usuario)}\n"
             f"  password: {q(password)}\n"
@@ -2793,6 +3095,7 @@ class SoulseekDownloader:
             base = str(estado or "fallo desconocido")
 
         razones = (
+            ("only absolute paths", "slskd no pudo guardar el archivo: la ruta de descargas de slskd.yml es inválida (reinicia la app)"),
             ("file not shared", "el usuario ya no comparte ese archivo"),
             ("too many files", "el usuario alcanzó su límite de archivos"),
             ("too many megabytes", "el usuario alcanzó su límite de MB"),
@@ -2908,22 +3211,42 @@ class SoulseekDownloader:
 
             origen = Path(encontrado)
 
+            archivo_final = origen
+
             try:
 
-                if (
-                    not destino_final.exists()
-                    and origen.resolve() != destino_final.resolve()
-                ):
-                    shutil.copy2(origen, destino_final)
+                destino_final.parent.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    mismo = origen.resolve() == destino_final.resolve()
+                except Exception:
+                    mismo = False
+
+                if not mismo:
+
+                    if destino_final.exists():
+                        # Ya había uno con ese nombre: se descarta el recién bajado.
+                        origen.unlink()
+
+                    else:
+                        try:
+                            shutil.move(str(origen), str(destino_final))
+                        except Exception:
+                            shutil.copy2(origen, destino_final)
+                            origen.unlink()
+
+                    archivo_final = destino_final
+
+                    self._borrar_carpetas_vacias(origen.parent)
 
             except Exception as e:
-                print(f"[SLSKD] No se pudo copiar el archivo: {e}")
+                print(f"[SLSKD] No se pudo mover el archivo a su carpeta final: {e}")
 
             emitir("completado", estado="Completado", progreso=100)
 
             return {
                 "estado": "completado",
-                "archivo": str(origen),
+                "archivo": str(archivo_final),
                 "resultado": resultado,
             }
 
@@ -2939,7 +3262,86 @@ class SoulseekDownloader:
 
         return {"estado": "error"}
 
-    def _descargar_candidatos(self, candidatos, control, emitir, misma_calidad=None):
+    def _audio_existente(self, nombre_base):
+        """Archivo de audio ya descargado con ese nombre (cualquier formato), o None."""
+
+        try:
+            for archivo in self.download_dir.glob(glob_literal(nombre_base) + ".*"):
+                if archivo.is_file() and archivo.suffix.lower() in EXTENSIONES_AUDIO_FINALES:
+                    return archivo
+        except Exception:
+            pass
+
+        return None
+
+    def _borrar_carpetas_vacias(self, carpeta):
+        """Borra la carpeta de Soulseek si quedó vacía (y las de arriba, hasta la interna)."""
+
+        try:
+            raiz = self.staging_dir.resolve()
+            actual = Path(carpeta).resolve()
+
+            while actual != raiz and raiz in actual.parents:
+
+                try:
+                    actual.rmdir()  # solo funciona si está vacía
+                except OSError:
+                    break
+
+                actual = actual.parent
+
+        except Exception:
+            pass
+
+    def limpiar_staging(self):
+        """
+        Quita de la carpeta interna las subcarpetas de Soulseek que quedaron sueltas:
+        borra los audios que ya están en la carpeta final y las carpetas vacías.
+        """
+
+        try:
+
+            if not self.staging_dir.exists():
+                return
+
+            existentes = set()
+
+            try:
+                existentes = {
+                    f.name.lower() for f in self.download_dir.iterdir() if f.is_file()
+                }
+            except Exception:
+                pass
+
+            for sub in self.staging_dir.iterdir():
+
+                if not sub.is_dir() or sub.name.startswith("."):
+                    continue
+
+                for archivo in sorted(sub.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+
+                    try:
+
+                        if archivo.is_file():
+
+                            if archivo.name.lower() in existentes:
+                                archivo.unlink()
+
+                        elif archivo.is_dir():
+                            archivo.rmdir()
+
+                    except OSError:
+                        pass
+
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+
+        except Exception as e:
+            print(f"[SLSKD] No se pudo limpiar la carpeta interna: {e}")
+
+    def _descargar_candidatos(self, candidatos, control, emitir, misma_calidad=None, nombre_base=None):
 
         """
         Pide varios matches a la vez (CANDIDATOS_EN_CARRERA) y se queda con el
@@ -3005,7 +3407,7 @@ class SoulseekDownloader:
 
                 emitir(
                     "descargando",
-                    estado="🔄 Probando otro match...",
+                    estado="Probando otro match...",
                     progreso=0,
                     detalle=aviso,
                 )
@@ -3045,7 +3447,16 @@ class SoulseekDownloader:
 
                     nombre_local = normalizar_nombre_archivo(filename)
 
-                    destino_final = self.download_dir / nombre_local
+                    if nombre_base:
+                        extension = Path(nombre_local).suffix
+                        destino_final = self.download_dir / f"{nombre_base}{extension}"
+                    else:
+                        destino_final = self.download_dir / nombre_local
+
+                    existente = self._audio_existente(nombre_base) if nombre_base else None
+
+                    if existente is not None:
+                        destino_final = existente
 
                     if destino_final.exists():
 
@@ -3065,7 +3476,7 @@ class SoulseekDownloader:
 
                     emitir(
                         "descargando",
-                        estado=f"⏳ Solicitando ({indice}/{total})",
+                        estado=f"Solicitando ({indice}/{total})",
                         progreso=0,
                         intento=indice,
                         total=total,
@@ -3306,7 +3717,7 @@ class SoulseekDownloader:
 
                 emitir(
                     "descargando",
-                    estado=rep["estado"] or f"⏳ Solicitando ({rep['indice']}/{total})",
+                    estado=rep["estado"] or f"Solicitando ({rep['indice']}/{total})",
                     progreso=rep["progreso"],
                     intento=rep["indice"],
                     total=total,
@@ -3354,7 +3765,7 @@ class SoulseekDownloader:
 
         # BUSCAR
 
-        emitir("buscando", estado="🔎 Buscando match...")
+        emitir("buscando", estado="Buscando match...")
 
         # Se busca con el título SIN la versión ("Tema - Radio Edit" -> "Tema"):
         # así slskd devuelve más archivos, y luego el ranking prefiere los que
@@ -3386,7 +3797,7 @@ class SoulseekDownloader:
 
             control.siguiente.clear()
 
-            emitir("buscando", estado="🔄 Buscando otro match...")
+            emitir("buscando", estado="Buscando otro match...")
 
             if len(resultados) > 1:
                 resultados = resultados[1:]
@@ -3454,6 +3865,7 @@ class SoulseekDownloader:
             resultados[:MAX_CANDIDATOS],
             control,
             emitir,
+            nombre_base=construir_nombre(artista, titulo),
         )
 
         if resultado_final is not None:
@@ -3533,6 +3945,8 @@ class SoulseekDownloader:
         resultados,
         actualizar_progreso=None,
         control=None,
+        artista=None,
+        titulo=None,
     ):
 
         """
@@ -3575,6 +3989,7 @@ class SoulseekDownloader:
             control,
             emitir,
             misma_calidad=False,
+            nombre_base=construir_nombre(artista, titulo) if (artista or titulo) else None,
         )
 
         if resultado is not None:
@@ -3726,7 +4141,7 @@ class SoulseekDownloader:
 
     def _carpetas_descarga(self):
 
-        carpetas = [self.download_dir, self.incomplete_dir]
+        carpetas = [self.staging_dir, self.incomplete_dir, self.download_dir]
 
         carpetas.extend(self._directorios_slskd())
 
@@ -3856,6 +4271,80 @@ class SoulseekDownloader:
     # ========================================================
     # LIMPIEZA GENERAL
     # ========================================================
+
+    def _transfers_activos(self, datos, usuario=None, acumulado=None):
+        """Recorre la respuesta de /transfers/downloads y junta los que no terminaron."""
+
+        if acumulado is None:
+            acumulado = []
+
+        if isinstance(datos, list):
+            for x in datos:
+                self._transfers_activos(x, usuario, acumulado)
+
+        elif isinstance(datos, dict):
+
+            usuario = datos.get("username") or usuario
+
+            if datos.get("id") and datos.get("state") is not None:
+
+                estado = str(datos.get("state") or "").lower()
+
+                if "completed" not in estado:
+                    acumulado.append((usuario, datos))
+
+            for valor in datos.values():
+                if isinstance(valor, (list, dict)):
+                    self._transfers_activos(valor, usuario, acumulado)
+
+        return acumulado
+
+    def cerrar_todo(self, borrar_incompletas=True):
+        """
+        Cierre limpio al salir de la app: cancela lo que está descargando,
+        cierra slskd y borra los archivos incompletos.
+        """
+
+        # 1) Cancelar en slskd lo que no terminó (con remove=true no quedan en la lista).
+        try:
+            for usuario, transfer in self._transfers_activos(self.obtener_descargas()):
+
+                try:
+                    self.session.delete(
+                        f"{self.base_url}/transfers/downloads/"
+                        f"{quote(str(usuario), safe='')}/{quote(str(transfer.get('id')), safe='')}",
+                        params={"remove": "true"},
+                        timeout=4,
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[SLSKD] No se pudieron cancelar las descargas: {e}")
+
+        # 2) Cerrar slskd (el que abrimos nosotros y cualquier otro que haya quedado).
+        try:
+            if self.slskd_process is not None and self.slskd_process.poll() is None:
+                self.slskd_process.terminate()
+        except Exception:
+            pass
+
+        self._cerrar_slskd_existente()
+
+        # 3) Borrar lo incompleto (con slskd cerrado ya no está bloqueado).
+        if borrar_incompletas:
+
+            self.limpiar_pendientes()
+
+            for carpeta in {self.download_dir, self.staging_dir}:
+                for patron in ("*.part", "*.ytdl", "*.part-Frag*"):
+                    for archivo in carpeta.glob(patron):
+                        try:
+                            archivo.unlink()
+                        except Exception:
+                            pass
+
+        self.limpiar_staging()
 
     def limpiar_historial(self):
 

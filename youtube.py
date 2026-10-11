@@ -12,11 +12,15 @@ Requisitos (una sola vez):
     copiar ffmpeg.exe y ffprobe.exe en la misma carpeta que gui.py.
 """
 
+import importlib
 import os
 import re
 import shutil
+import sys
 import threading
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -25,7 +29,71 @@ try:
 except Exception:  # yt-dlp no está instalado
     yt_dlp = None
 
-from downloader import SoulseekDownloader
+URL_YTDLP = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+URL_DENO = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
+
+# Cada cuántos días se renueva yt-dlp (YouTube cambia seguido y las versiones viejas dan 403).
+YT_DIAS_ACTUALIZAR = 3
+
+_candado_componentes = threading.RLock()
+_estado = {"actualizado_en_sesion": False, "ruta_cargada": None}
+
+
+def _descargar_archivo(url, destino, timeout=60):
+    """Descarga un archivo de forma atómica (primero a .tmp)."""
+
+    destino = Path(destino)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporal = destino.with_suffix(destino.suffix + ".tmp")
+
+    pedido = urllib.request.Request(url, headers={"User-Agent": "Spotiseek"})
+
+    with urllib.request.urlopen(pedido, timeout=timeout) as r, open(temporal, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+    os.replace(temporal, destino)
+
+
+def _cargar_ytdlp(ruta_zip):
+    """Importa yt-dlp desde el archivo descargado (si es válido). Devuelve el módulo o None."""
+
+    global yt_dlp
+
+    ruta_zip = str(ruta_zip)
+
+    if not os.path.isfile(ruta_zip):
+        return None
+
+    if _estado["ruta_cargada"] == ruta_zip and yt_dlp is not None:
+        return yt_dlp
+
+    anterior = yt_dlp
+
+    try:
+        for nombre in [n for n in sys.modules if n == "yt_dlp" or n.startswith("yt_dlp.") or n.startswith("yt_dlp_ejs")]:
+            del sys.modules[nombre]
+
+        if ruta_zip in sys.path:
+            sys.path.remove(ruta_zip)
+
+        sys.path.insert(0, ruta_zip)
+        importlib.invalidate_caches()
+
+        modulo = importlib.import_module("yt_dlp")
+
+        yt_dlp = modulo
+        _estado["ruta_cargada"] = ruta_zip
+
+        return modulo
+
+    except Exception as e:
+        print(f"[YT] No pude cargar el yt-dlp descargado: {e}")
+
+        yt_dlp = anterior
+
+        return None
+
+from downloader import SoulseekDownloader, construir_nombre
 
 
 # ============================================================
@@ -62,15 +130,9 @@ class _Cancelado(Exception):
 
 
 def nombre_archivo(artista, titulo):
-    """'Artista - Título' sin caracteres que Windows no permite en nombres de archivo."""
+    """Nombre del archivo según el formato elegido en Configuración (sin caracteres prohibidos en Windows)."""
 
-    nombre = f"{artista} - {titulo}"
-
-    nombre = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", nombre)
-
-    nombre = re.sub(r"\s+", " ", nombre).strip(" .")
-
-    return nombre or "cancion"
+    return construir_nombre(artista, titulo)
 
 
 # ============================================================
@@ -85,6 +147,111 @@ class YouTubeMusic:
         self.base_dir = Path(base_dir)
 
         self._semaforo = threading.Semaphore(max(1, int(YT_MAX_SIMULTANEAS)))
+
+    # ========================================================
+    # COMPONENTES (yt-dlp actualizado + motor JavaScript)
+    # ========================================================
+
+    @property
+    def carpeta_componentes(self):
+        return self.base_dir / "componentes"
+
+    def _ruta_ytdlp(self):
+        return self.carpeta_componentes / "yt-dlp.zip"
+
+    def _ruta_deno(self):
+        return self.carpeta_componentes / ("deno.exe" if os.name == "nt" else "deno")
+
+    def _runtimes_js(self):
+        """Motores JavaScript disponibles (YouTube los exige para firmar las descargas)."""
+
+        runtimes = {}
+
+        deno = self._ruta_deno()
+
+        if deno.is_file():
+            runtimes["deno"] = {"path": str(deno)}
+
+        elif shutil.which("deno"):
+            runtimes["deno"] = {"path": shutil.which("deno")}
+
+        for nombre in ("node", "bun", "quickjs"):
+
+            ruta = shutil.which(nombre)
+
+            if ruta:
+                runtimes[nombre] = {"path": ruta}
+
+        return runtimes
+
+    def preparar_componentes(self, forzar=False):
+        """Deja listo yt-dlp actualizado y un motor JS. Nunca lanza errores."""
+
+        with _candado_componentes:
+
+            try:
+
+                zip_yt = self._ruta_ytdlp()
+
+                vieja = (
+                    not zip_yt.is_file()
+                    or (time.time() - zip_yt.stat().st_mtime) > YT_DIAS_ACTUALIZAR * 86400
+                )
+
+                if forzar or vieja:
+
+                    try:
+                        print("[YT] Descargando la versión más reciente de yt-dlp...")
+                        _descargar_archivo(URL_YTDLP, zip_yt)
+                        _estado["ruta_cargada"] = None
+
+                    except Exception as e:
+                        print(f"[YT] No pude actualizar yt-dlp: {e}")
+
+                if zip_yt.is_file():
+                    _cargar_ytdlp(zip_yt)
+
+                if os.name == "nt" and not self._runtimes_js():
+
+                    try:
+                        print("[YT] Descargando el motor JavaScript (deno)...")
+
+                        temporal = self.carpeta_componentes / "deno.zip"
+
+                        _descargar_archivo(URL_DENO, temporal, timeout=180)
+
+                        with zipfile.ZipFile(temporal) as z:
+                            with z.open("deno.exe") as origen, open(self._ruta_deno(), "wb") as f:
+                                shutil.copyfileobj(origen, f)
+
+                        os.remove(temporal)
+
+                    except Exception as e:
+                        print(f"[YT] No pude descargar deno: {e}")
+
+            except Exception as e:
+                print(f"[YT] Error preparando componentes: {e}")
+
+    def _asegurar_componentes(self):
+        """Prepara los componentes una vez por sesión (puede tardar: se usa desde hilos de trabajo)."""
+
+        with _candado_componentes:
+
+            if not _estado.get("preparado"):
+                self.preparar_componentes()
+                _estado["preparado"] = True
+
+    def _actualizar_por_403(self):
+        """Tras un error 403: baja yt-dlp de nuevo (una vez por sesión). True si hubo cambio."""
+
+        if _estado["actualizado_en_sesion"]:
+            return False
+
+        _estado["actualizado_en_sesion"] = True
+
+        self.preparar_componentes(forzar=True)
+
+        return True
 
     # ========================================================
     # DISPONIBILIDAD
@@ -117,9 +284,15 @@ class YouTubeMusic:
     def disponible(self):
         """Devuelve (True, 'ok') o (False, explicación de lo que falta)."""
 
+        # Los componentes se preparan en segundo plano para no congelar la ventana.
+        if not _estado.get("preparado") and not _estado.get("lanzado"):
+            _estado["lanzado"] = True
+            threading.Thread(target=self._asegurar_componentes, daemon=True).start()
+
         if yt_dlp is None:
             return False, (
-                "Falta instalar yt-dlp. En la terminal ejecuta:  pip install yt-dlp"
+                "Todavía no tengo yt-dlp: se descarga solo desde GitHub. "
+                "Revisa tu conexión a internet y vuelve a intentarlo en un minuto."
             )
 
         faltan = [
@@ -145,7 +318,13 @@ class YouTubeMusic:
             "noplaylist": True,
             "socket_timeout": 20,
             "retries": 3,
+            "remote_components": ["ejs:github"],
         }
+
+        runtimes = self._runtimes_js()
+
+        if runtimes:
+            opciones["js_runtimes"] = runtimes
 
         carpeta = self._buscar_programa("ffmpeg")
 
@@ -403,7 +582,7 @@ class YouTubeMusic:
         except Exception:
             pass
 
-    def _descargar(self, entrada, artista, titulo, album, emitir, control):
+    def _descargar(self, entrada, artista, titulo, album, emitir, control, clientes=None):
         """Descarga y convierte un resultado. Devuelve la ruta del MP3."""
 
         nombre_base = nombre_archivo(artista, titulo)
@@ -449,15 +628,15 @@ class YouTubeMusic:
 
                 porcentaje = (hecho / total * 90.0) if total else 0.0
 
-                avisar(porcentaje, "▶ YouTube Music: descargando el audio...")
+                avisar(porcentaje, "YouTube Music: descargando el audio...")
 
             elif estado == "finished":
-                avisar(92.0, "▶ YouTube Music: convirtiendo a MP3 320...")
+                avisar(92.0, "YouTube Music: convirtiendo a MP3 320...")
 
         def hook_conversion(d):
 
             if d.get("status") == "started":
-                avisar(95.0, f"▶ YouTube Music: convirtiendo a MP3 {YT_BITRATE_MP3}...")
+                avisar(95.0, f"YouTube Music: convirtiendo a MP3 {YT_BITRATE_MP3}...")
 
         opciones = {
             **self._opciones_base(),
@@ -481,6 +660,9 @@ class YouTubeMusic:
                 ]
             },
         }
+
+        if clientes:
+            opciones["extractor_args"] = {"youtube": {"player_client": list(clientes)}}
 
         try:
 
@@ -542,6 +724,8 @@ class YouTubeMusic:
             emitir("cancelado", estado="Cancelado")
             return {"estado": "cancelado"}
 
+        self._asegurar_componentes()
+
         ok, mensaje = self.disponible()
 
         if not ok:
@@ -574,8 +758,8 @@ class YouTubeMusic:
         # Buscar
         emitir(
             "buscando",
-            estado="🔎 Buscando en YouTube Music...",
-            detalle="▶ YouTube Music: buscando la canción...",
+            estado="Buscando en YouTube Music...",
+            detalle="YouTube Music: buscando la canción...",
         )
 
         print(f"[YT] Buscando: {artista} - {titulo}")
@@ -612,7 +796,37 @@ class YouTubeMusic:
                     if cancelado():
                         raise _Cancelado()
 
-                    ruta = self._descargar(entrada, artista, titulo, album, emitir, control)
+                    try:
+                        ruta = self._descargar(entrada, artista, titulo, album, emitir, control)
+
+                    except _Cancelado:
+                        raise
+
+                    except Exception as e403:
+
+                        if "403" in str(e403) and self._actualizar_por_403():
+
+                            emitir(
+                                "descargando",
+                                estado="InProgress",
+                                progreso=0,
+                                intento=1,
+                                total=1,
+                                detalle="YouTube: actualizando componentes y reintentando...",
+                            )
+
+                            ruta = self._descargar(entrada, artista, titulo, album, emitir, control)
+
+                        elif "403" in str(e403):
+
+                            # Último recurso: otros clientes de YouTube
+                            ruta = self._descargar(
+                                entrada, artista, titulo, album, emitir, control,
+                                clientes=["tv", "web_safari", "mweb"],
+                            )
+
+                        else:
+                            raise
 
                 emitir("completado", estado="Completado", progreso=100)
 
@@ -640,8 +854,8 @@ class YouTubeMusic:
                 print(f"[YT] Candidato {numero} falló: {e}")
 
         detalle = (
-            "YouTube falló al descargar. Si pasa seguido, actualiza yt-dlp "
-            "(pip install -U yt-dlp). "
+            "YouTube falló al descargar. La app ya intentó actualizar sus componentes; "
+            "si sigue pasando, vuelve a intentarlo más tarde. "
             f"Último error: {ultimo_error[:120]}"
         )
 
