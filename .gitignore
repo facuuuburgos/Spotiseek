@@ -1,0 +1,66 @@
+# ==========================================
+# Configuración privada y credenciales
+# ==========================================
+slskd/slskd.yml
+slskd/*.yml
+slskd.yml
+.env
+.env.*
+
+# ==========================================
+# Caché y archivos temporales
+# ==========================================
+.cache
+.cache/
+.vs/
+__pycache__/
+*.py[cod]
+*.tmp
+*.temp
+*.bak
+*.log
+
+# ==========================================
+# Descargas de música
+# ==========================================
+downloads/
+.incomplete/
+slskd/downloads/
+slskd/incomplete/
+slskd/config/
+slskd/data/
+
+# ==========================================
+# Entornos virtuales de Python
+# ==========================================
+venv/
+.venv/
+env/
+
+# ==========================================
+# Archivos generados al compilar
+# ==========================================
+build/
+dist/
+*.spec
+empaquetado/salida/
+
+# ==========================================
+# Publicaciones generadas por el actualizador
+# ==========================================
+publicacion/
+actualizacion/
+
+# ==========================================
+# Ejecutables y herramientas pesadas
+# Se conservan localmente, no en GitHub
+# ==========================================
+ffmpeg/
+slskd/slskd.exe
+
+# ==========================================
+# Sistema operativo
+# ==========================================
+Thumbs.db
+Desktop.ini
+.DS_Store
