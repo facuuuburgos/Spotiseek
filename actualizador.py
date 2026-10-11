@@ -22,7 +22,7 @@ from pathlib import Path
 # CONFIGURACIÓN
 # ----------------------------------------------------------------------
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Dirección del archivo version.json publicado (ver la guía de publicación).
 # Ejemplo con GitHub:

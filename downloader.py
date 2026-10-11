@@ -124,7 +124,7 @@ class ControlDescarga:
 # ============================================================
 
 AJUSTES_PREDETERMINADOS = {
-    # "" = la carpeta «downloads» de la app
+    # "" = Descargas de Windows\\Spotiseek
     "carpeta_descargas": "",
     # "titulo_artista" -> «Canción - Artista»   |   "artista_titulo" -> «Artista - Canción»
     "formato_nombre": "titulo_artista",
@@ -139,6 +139,8 @@ AJUSTES_PREDETERMINADOS = {
     "confirmar_cierre": True,
     "buscar_actualizaciones": True,
     "abrir_carpeta_al_terminar": False,
+    # Interno: se pone en True cuando ya se movieron las canciones de la carpeta vieja
+    "migracion_descargas": False,
 }
 
 # (mínimo, máximo) de los ajustes numéricos
@@ -244,6 +246,50 @@ class Ajustes:
         except Exception as e:
             print(f"[AJUSTES] No se pudo guardar ajustes.json: {e}")
             return False
+
+
+def carpeta_descargas_de_windows():
+    """La carpeta «Descargas» real del usuario (aunque la haya movido de lugar)."""
+
+    if os.name == "nt":
+
+        try:
+            import ctypes
+            import uuid
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            u = uuid.UUID("374DE290-123F-4565-9164-39C4925E467B")  # FOLDERID_Downloads
+
+            guid = GUID(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+            ruta = ctypes.c_wchar_p()
+
+            resultado = ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(guid), 0, None, ctypes.byref(ruta)
+            )
+
+            if resultado == 0 and ruta.value:
+                carpeta = Path(ruta.value)
+                ctypes.windll.ole32.CoTaskMemFree(ruta)
+                return carpeta
+
+        except Exception as e:
+            print(f"[AJUSTES] No pude leer la carpeta Descargas de Windows: {e}")
+
+    return Path.home() / "Downloads"
+
+
+def carpeta_final_predeterminada():
+    """Descargas de Windows\\Spotiseek"""
+    return carpeta_descargas_de_windows() / "Spotiseek"
 
 
 def construir_nombre(artista, titulo, formato=None):
@@ -382,19 +428,70 @@ class SoulseekDownloader:
         # Carpeta final
         elegida = str(a.get("carpeta_descargas") or "").strip()
 
-        destino = Path(elegida).expanduser() if elegida else self.staging_dir
+        destino = Path(elegida).expanduser() if elegida else carpeta_final_predeterminada()
 
         try:
             destino.mkdir(parents=True, exist_ok=True)
 
         except Exception as e:
             print(f"[AJUSTES] No se pudo usar la carpeta «{destino}»: {e}. Se usa la predeterminada.")
-            destino = self.staging_dir
+
+            destino = carpeta_final_predeterminada()
+
+            try:
+                destino.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                destino = self.staging_dir
 
         self.download_dir = destino
 
+        if not elegida:
+            self._migrar_descargas_antiguas()
+
         # YouTube guarda directo en la carpeta final: se vuelve a crear con la carpeta nueva.
         self._yt = None
+
+    def carpeta_predeterminada(self):
+        return carpeta_final_predeterminada()
+
+    def _migrar_descargas_antiguas(self):
+        """
+        Versiones anteriores guardaban las canciones junto al programa (carpeta «downloads»).
+        Una sola vez, esos audios se mueven a la carpeta nueva (Descargas\\Spotiseek).
+        """
+
+        if self.ajustes.get("migracion_descargas"):
+            return
+
+        try:
+
+            if self.download_dir.resolve() != self.staging_dir.resolve() and self.staging_dir.exists():
+
+                movidos = 0
+
+                for archivo in list(self.staging_dir.iterdir()):
+
+                    if not archivo.is_file() or archivo.suffix.lower() not in EXTENSIONES_AUDIO_FINALES:
+                        continue
+
+                    destino = self.download_dir / archivo.name
+
+                    if destino.exists():
+                        continue
+
+                    try:
+                        shutil.move(str(archivo), str(destino))
+                        movidos += 1
+                    except Exception as e:
+                        print(f"[AJUSTES] No pude mover {archivo.name}: {e}")
+
+                if movidos:
+                    print(f"[AJUSTES] {movidos} canciones movidas a {self.download_dir}")
+
+            self.ajustes.actualizar({"migracion_descargas": True})
+
+        except Exception as e:
+            print(f"[AJUSTES] No se pudo migrar las descargas anteriores: {e}")
 
     # ========================================================
     # SLSKD - SERVIDOR

@@ -2333,7 +2333,7 @@ class VentanaAjustes(ctk.CTkToplevel):
         texto = self.var_carpeta.get().strip()
 
         if not texto:
-            texto = str(self.downloader.staging_dir) + "   (predeterminada)"
+            texto = str(self.downloader.carpeta_predeterminada()) + "   (predeterminada)"
 
         self.entry_carpeta.configure(state="normal")
         self.entry_carpeta.delete(0, "end")
@@ -2342,7 +2342,7 @@ class VentanaAjustes(ctk.CTkToplevel):
 
     def _elegir_carpeta(self):
 
-        inicial = self.var_carpeta.get().strip() or str(self.downloader.staging_dir)
+        inicial = self.var_carpeta.get().strip() or str(self.downloader.download_dir)
 
         try:
             elegida = filedialog.askdirectory(parent=self, initialdir=inicial, title="Carpeta de descargas")
