@@ -553,6 +553,16 @@ NOMBRE_APP = "Spotiseek"
 def _carpetas_recursos():
     carpetas = []
 
+    # Imágenes que llegaron con una actualización (tienen prioridad sobre las del instalador).
+    try:
+        if getattr(sys, "frozen", False):
+            base_prog = Path(sys.executable).resolve().parent
+        else:
+            base_prog = Path(__file__).resolve().parent
+        carpetas.append(base_prog / "actualizacion")
+    except Exception:
+        pass
+
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         carpetas.append(Path(meipass))

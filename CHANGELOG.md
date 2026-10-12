@@ -1,10 +1,17 @@
 # Historial de cambios
 
+## [1.0.3] - 2026-10-11
+
+- **Icono más nítido** en la barra de tareas y en la ventana (versiones propias para cada tamaño). Llega por actualización automática.
+- Las actualizaciones ahora también pueden renovar los **iconos e imágenes** de la app, no solo el código.
+- Panel de administración con icono propio (rojo) para distinguirlo.
+
 ## [1.0.2] - 2026-10-11
 
-- **Actualización automática:** al abrir, la app busca una versión nueva y, si la hay, se instala y se reinicia sola.
-- **Registro de uso y suspensiones:** en el primer inicio se explica y se pide aceptar el envío de IP y usuario de Soulseek (nunca la contraseña). El creador puede suspender el acceso; la persona ve un aviso con el motivo.
-- Se quitó el ajuste «Buscar actualizaciones al abrir» (ahora es siempre).
+**Nuevo**
+- **Actualización automática:** al abrir, la app busca una versión nueva y, si la hay, la instala sola y se reinicia. Se quitó el ajuste «Buscar actualizaciones al abrir» (ahora es siempre).
+- **Registro de uso y suspensiones.** En el primer inicio se explica y se pide aceptar el envío de la IP, el usuario de Soulseek (nunca la contraseña), la versión, el sistema operativo y un identificador de la instalación y de la computadora (hash). El creador puede suspender el acceso: la persona ve un aviso con el motivo y la app se cierra. Mientras la app está abierta se vuelve a comprobar cada 5 minutos. Ver [PRIVACIDAD.md](PRIVACIDAD.md).
+- **Panel de administración** (carpeta `admin/`) para el creador: lista de usuarios, suspensión y reactivación, notas privadas.
 
 ## [1.0.1] - 2026-10-11
 

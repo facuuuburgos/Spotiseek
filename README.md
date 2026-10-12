@@ -111,12 +111,12 @@ No por ahora; está pensado para Windows.
 
 ## Privacidad y seguridad
 
-- **Datos que se envían al creador:** al abrir la app (y solo si lo aceptás en el primer inicio) se envían tu **dirección IP**, tu **nombre de usuario de Soulseek** (**nunca la contraseña**), la versión de la app, tu sistema operativo y un identificador anónimo de la instalación. Sirven para mejorar la app y para poder suspender el acceso ante un mal uso. No se envía nada de tu música ni de tus listas. Si no aceptás, la app no se puede usar.
+- **Datos que se envían al creador:** al abrir la app (y solo si lo aceptás en el primer inicio) se envían tu **dirección IP**, tu **nombre de usuario de Soulseek** (**nunca la contraseña**), la versión de la app, tu sistema operativo y un identificador anónimo de la instalación. Sirven para mejorar la app y para poder suspender el acceso ante un mal uso. No se envía nada de tu música ni de tus listas. Si no aceptás, la app no se puede usar. Más detalle en [PRIVACIDAD.md](PRIVACIDAD.md).
 - Tu usuario y contraseña de Soulseek se guardan **en tu computadora**, en el archivo `slskd\slskd.yml` dentro de la carpeta de instalación, **en texto plano**. No lo compartas ni lo subas a ningún lado.
 - La app se conecta a: Spotify (para leer los enlaces), la red Soulseek (a través de slskd), YouTube (solo si usás el respaldo) y GitHub (para buscar actualizaciones y descargar componentes de YouTube).
 - Las **actualizaciones** descargan archivos `.py` nuevos desde GitHub y los ejecutan. Se comprueba su integridad con un hash SHA-256, pero la confianza recae en este repositorio. La app busca e instala las actualizaciones **automáticamente cada vez que se abre**.
 
-## Compilar desde el código (para desarrolladores)
+## Ejecutar desde el código
 
 Requisitos: Python 3.11 o superior en Windows.
 
@@ -125,14 +125,9 @@ pip install -r requirements.txt
 python lanzador.py
 ```
 
-Para generar el programa y el instalador hacen falta además `slskd\slskd.exe` (descargado de [slskd](https://github.com/slskd/slskd/releases)) y `ffmpeg\ffmpeg.exe` y `ffprobe.exe` (por ejemplo de [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)), que **no están en este repositorio**. Después:
+Hace falta además `slskd\slskd.exe` (descargado de [slskd](https://github.com/slskd/slskd/releases)) y `ffmpeg\ffmpeg.exe` y `ffprobe.exe` (por ejemplo de [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)), que **no están en este repositorio**.
 
-```bat
-empaquetado\compilar.bat
-empaquetado\compilar_instalador.bat
-```
-
-El resultado queda en `empaquetado\salida\Instalar_Spotiseek.exe`.
+Los scripts con los que el autor genera el instalador y las actualizaciones no forman parte de este repositorio. Lo que se distribuye de forma oficial es lo que figura en [Releases](../../releases).
 
 ## Tecnologías y créditos
 

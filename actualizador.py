@@ -38,6 +38,15 @@ ARCHIVOS_PERMITIDOS = {
     "actualizador.py",
 }
 
+# Imágenes/iconos que una actualización también puede reemplazar (carpeta assets/).
+RECURSOS_PERMITIDOS = {
+    "icono.ico",
+    "logo.png",
+    "logo_128.png",
+    "logo_64.png",
+    "logo_simbolo.png",
+}
+
 CARPETA_ACTUALIZACION = "actualizacion"
 TIMEOUT_SEG = 15
 
@@ -150,25 +159,43 @@ def instalar_actualizacion(info, base_dir, progreso=None):
         nuevos = tmp / "nuevos"
         nuevos.mkdir()
 
+        (nuevos / "assets").mkdir()
+
         with zipfile.ZipFile(zip_local) as z:
 
             for nombre in z.namelist():
 
-                limpio = Path(nombre).name  # ignora carpetas dentro del zip
-
-                if limpio not in ARCHIVOS_PERMITIDOS or nombre.endswith("/"):
+                if nombre.endswith("/"):
                     continue
 
-                (nuevos / limpio).write_bytes(z.read(nombre))
+                limpio = Path(nombre).name  # ignora carpetas dentro del zip
 
-        archivos = sorted(p.name for p in nuevos.iterdir())
+                if limpio in ARCHIVOS_PERMITIDOS:
+                    (nuevos / limpio).write_bytes(z.read(nombre))
 
-        if not archivos:
+                elif limpio in RECURSOS_PERMITIDOS:
+                    (nuevos / "assets" / limpio).write_bytes(z.read(nombre))
+
+        codigo = sorted(p.name for p in nuevos.iterdir() if p.is_file())
+        recursos = sorted(p.name for p in (nuevos / "assets").iterdir() if p.is_file())
+
+        if not codigo and not recursos:
             raise ValueError("El zip no contiene archivos de la app.")
 
         # Que no tengan errores de sintaxis antes de instalarlos.
-        for nombre in archivos:
+        for nombre in codigo:
             compile((nuevos / nombre).read_text(encoding="utf-8"), nombre, "exec")
+
+        # Que las imágenes sean válidas (si Pillow está disponible).
+        try:
+            from PIL import Image
+            for nombre in recursos:
+                with Image.open(nuevos / "assets" / nombre) as im:
+                    im.verify()
+        except ImportError:
+            pass
+
+        archivos = codigo + ["assets/" + n for n in recursos]
 
         avisar("Instalando...")
 
@@ -183,8 +210,13 @@ def instalar_actualizacion(info, base_dir, progreso=None):
         if any(destino.iterdir()):
             shutil.copytree(destino, respaldo)
 
-        for nombre in archivos:
+        for nombre in codigo:
             shutil.copy2(nuevos / nombre, destino / nombre)
+
+        if recursos:
+            (destino / "assets").mkdir(exist_ok=True)
+            for nombre in recursos:
+                shutil.copy2(nuevos / "assets" / nombre, destino / "assets" / nombre)
 
         (destino / "version.txt").write_text(info["version"], encoding="utf-8")
 

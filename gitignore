@@ -82,3 +82,8 @@ instalacion.json
 admin/dist/
 admin/build/
 *.spec
+
+# Herramientas de publicación del creador (no se suben)
+empaquetado/
+publicacion/
+SHA256SUMS.txt
