@@ -14,7 +14,7 @@
 </p>
 
 <!-- Reemplazá esta línea por una captura real de la app: -->
-<!-- <p align="center"><img src="docs/captura-principal.png" alt="Captura de Spotiseek" width="800"></p> -->
+captura-principal.png
 
 ---
 
