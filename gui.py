@@ -2234,10 +2234,6 @@ class VentanaAjustes(ctk.CTkToplevel):
             tarjeta, "confirmar_cierre", "Avisar antes de cerrar con descargas en curso",
             "Si lo apagas, la app cierra sin preguntar (las descargas se detienen igual).", actuales,
         )
-        self._interruptor(
-            tarjeta, "buscar_actualizaciones", "Buscar actualizaciones al abrir",
-            "Comprueba si hay una versión nueva cada vez que inicias la app.", actuales,
-        )
 
         centrar_ventana(self, 640, 720, app)
 
@@ -4229,7 +4225,18 @@ class App(ctk.CTk):
         def tarea():
             try:
                 self.actualizar_progreso_inicio(
-                    0.05, "Iniciando aplicación...", "Preparando componentes..."
+                    0.05, "Iniciando aplicación...", "Buscando actualizaciones..."
+                )
+
+                # Cada vez que se abre: si hay versión nueva se instala sola y la app se reinicia.
+                if self._actualizar_al_inicio():
+                    return
+
+                if not self._pedir_consentimiento():
+                    return
+
+                self.actualizar_progreso_inicio(
+                    0.10, "Iniciando aplicación...", "Preparando componentes..."
                 )
                 time.sleep(0.15)
 
@@ -4282,6 +4289,9 @@ class App(ctk.CTk):
                     if not resultado_cfg["ok"]:
                         self._llamar_en_ventana(self.configuracion_pendiente)
                         return
+
+                if self._comprobar_suspension():
+                    return
 
                 self.actualizar_progreso_inicio(
                     0.35, "Configurando Soulseek...", "Preparando servidor local..."
@@ -4343,6 +4353,208 @@ class App(ctk.CTk):
 
         threading.Thread(target=tarea, daemon=True).start()
 
+    # ========================================================
+    # INICIO: ACTUALIZACIÓN AUTOMÁTICA, CONSENTIMIENTO, SUSPENSIÓN
+    # ========================================================
+
+    def _en_ventana_y_esperar(self, funcion):
+        """Ejecuta funcion() en el hilo de la ventana y espera su resultado."""
+
+        evento = threading.Event()
+        caja = {}
+
+        def ejecutar():
+            try:
+                caja["r"] = funcion()
+            except Exception as e:
+                print(f"[GUI] Error en diálogo: {e}")
+            finally:
+                evento.set()
+
+        self._llamar_en_ventana(ejecutar)
+        evento.wait()
+        return caja.get("r")
+
+    def _actualizar_al_inicio(self):
+        """
+        Busca una versión nueva y, si existe, la instala sin preguntar y reinicia.
+        Devuelve True si la app se está reiniciando (hay que dejar de iniciar).
+        """
+
+        if not actualizador.URL_VERSION.strip():
+            return False
+
+        try:
+            info = actualizador.buscar_actualizacion(timeout=6)
+        except Exception as e:
+            print(f"[ACTUALIZADOR] No se pudo comprobar: {e}")
+            return False
+
+        if info is None:
+            return False
+
+        base = self._carpeta_programa()
+        marca = base / "ultima_actualizacion.txt"
+
+        # Si esta misma versión ya se intentó instalar y no quedó (porque falló al
+        # cargar), no se repite: así no se entra en un bucle de reinicios.
+        try:
+            if marca.exists() and marca.read_text(encoding="utf-8").strip() == info["version"]:
+                print(f"[ACTUALIZADOR] La v{info['version']} ya se intentó instalar; se omite.")
+                return False
+        except Exception:
+            pass
+
+        self.actualizar_progreso_inicio(
+            0.08, f"Actualizando a la v{info['version']}...", "Descargando la nueva versión..."
+        )
+
+        try:
+            actualizador.instalar_actualizacion(info, base)
+        except Exception as e:
+            print(f"[ACTUALIZADOR] Error: {e}")
+            return False
+
+        try:
+            marca.write_text(info["version"], encoding="utf-8")
+        except Exception:
+            pass
+
+        self.actualizar_progreso_inicio(0.12, "Actualización instalada", "Reiniciando...")
+        time.sleep(0.6)
+
+        self._llamar_en_ventana(self._reiniciar_app)
+        return True
+
+    def _pedir_consentimiento(self):
+        """Primera vez: explica qué datos se envían. Devuelve False si no se acepta."""
+
+        base = self._carpeta_programa()
+
+        if not actualizador.cuentas_activas() or actualizador.consentimiento_dado(base):
+            return True
+
+        def preguntar():
+            try:
+                self.ventana_inicio.withdraw()
+            except Exception:
+                pass
+
+            r = _mostrar_mensaje(
+                "Antes de empezar", actualizador.TEXTO_PRIVACIDAD, None,
+                tipo="info", botones=("Acepto", "No acepto"), principal=0, cancelar=1,
+            )
+
+            return r == 0
+
+        aceptado = self._en_ventana_y_esperar(preguntar)
+
+        if not aceptado:
+            self._llamar_en_ventana(lambda: os._exit(0))
+            return False
+
+        actualizador.guardar_consentimiento(base)
+
+        self._llamar_en_ventana(
+            lambda: self.ventana_inicio.deiconify() if self.ventana_inicio.winfo_exists() else None
+        )
+
+        return True
+
+    # Cada cuántos minutos la app abierta pregunta si fue suspendida.
+    MINUTOS_VIGILANCIA = 5
+
+    def _iniciar_vigilancia(self):
+        """Con la app abierta, vuelve a comprobar la suspensión cada pocos minutos."""
+
+        if not actualizador.cuentas_activas() or getattr(self, "_vigilando", False):
+            return
+
+        self._vigilando = True
+        self.after(int(self.MINUTOS_VIGILANCIA * 60 * 1000), self._vigilar_suspension)
+
+    def _vigilar_suspension(self):
+
+        if getattr(self, "_cerrando", False):
+            return
+
+        def tarea():
+            try:
+                usuario = self.downloader.usuario_soulseek_configurado()
+            except Exception:
+                usuario = ""
+
+            r = actualizador.comprobar_suspension(self._carpeta_programa(), usuario)
+
+            if r and r.get("bloqueado") and not r.get("sin_conexion"):
+                self._llamar_en_ventana(lambda m=r.get("motivo", ""): self._expulsar_por_suspension(m))
+
+        threading.Thread(target=tarea, daemon=True).start()
+
+        self.after(int(self.MINUTOS_VIGILANCIA * 60 * 1000), self._vigilar_suspension)
+
+    def _expulsar_por_suspension(self, motivo):
+
+        if getattr(self, "_expulsando", False):
+            return
+
+        self._expulsando = True
+
+        _mostrar_mensaje(
+            "Acceso suspendido",
+            "El creador de Spotiseek decidió suspender tu acceso a la app.\n\n"
+            f"Motivo: {motivo or 'No se indicó un motivo.'}\n\n"
+            "Las descargas en curso se detendrán y la app se cerrará.",
+            self if self.winfo_viewable() else None,
+            tipo="error", botones=("Cerrar",), principal=0, cancelar=0,
+        )
+
+        self._cierre_limpio()
+
+    def _comprobar_suspension(self):
+        """Registra el inicio en el servidor. Devuelve True si el acceso está suspendido."""
+
+        if not actualizador.cuentas_activas():
+            return False
+
+        self.actualizar_progreso_inicio(0.30, "Comprobando acceso...", "Un momento...")
+
+        try:
+            usuario = self.downloader.usuario_soulseek_configurado()
+        except Exception:
+            usuario = ""
+
+        resultado = actualizador.registrar_inicio(self._carpeta_programa(), usuario)
+
+        if not resultado or not resultado.get("bloqueado"):
+            return False
+
+        motivo = resultado.get("motivo") or "No se indicó un motivo."
+
+        def mostrar():
+            try:
+                self.ventana_inicio.withdraw()
+            except Exception:
+                pass
+
+            _mostrar_mensaje(
+                "Acceso suspendido",
+                "El creador de Spotiseek decidió suspender tu acceso a la app.\n\n"
+                f"Motivo: {motivo}\n\n"
+                "Si crees que es un error, comunícate con el creador.",
+                None, tipo="error", botones=("Cerrar",), principal=0, cancelar=0,
+            )
+
+        self._en_ventana_y_esperar(mostrar)
+
+        try:
+            if self.downloader is not None:
+                self.downloader.cerrar_todo()
+        except Exception:
+            pass
+
+        os._exit(0)
+
     def finalizar_inicializacion(self):
 
         self.app_lista = True
@@ -4355,15 +4567,11 @@ class App(ctk.CTk):
 
         self.after(400, self.ocultar_pantalla_inicio)
 
+        self._iniciar_vigilancia()
+
         if self._ajuste("youtube_respaldo") and not self.var_fallback_youtube.get():
             self.var_fallback_youtube.set(True)
             self.fallback_youtube = True
-
-        if not getattr(self, "_actualizaciones_comprobadas", False):
-            self._actualizaciones_comprobadas = True
-
-            if self._ajuste("buscar_actualizaciones"):
-                self.after(2500, lambda: self.buscar_actualizaciones(manual=False))
 
     def inicializacion_fallida(self, error=None):
 

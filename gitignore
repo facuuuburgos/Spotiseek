@@ -75,3 +75,10 @@ ajustes.json
 
 # Versión vieja que ya no se usa
 gui_ctk.py
+
+# Datos privados del creador / de cada instalación
+panel_config.json
+instalacion.json
+admin/dist/
+admin/build/
+*.spec
